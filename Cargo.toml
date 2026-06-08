@@ -1,0 +1,7 @@
+[package]
+name = "upper_camera"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opencv = { version = "0.98.2", default-features = false, features = ["videoio", "highgui", "imgproc"] }
