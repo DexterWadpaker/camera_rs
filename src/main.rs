@@ -4,18 +4,17 @@ use opencv::{
 };
 use std::net::UdpSocket;
 
-// Размеры стенда (сантиметры)
+// Размеры стенда в сантиметрах
 const ARENA_LENGTH_CM: f64 = 142.0; // Ось X
 const ARENA_WIDTH_CM: f64 = 77.0;   // Ось Y
 
-// Ожидаемые площади объектов (см^2)
-const OBSTACLE_AREA_CM2: f64 = 8.5 * 8.5; // ~72.2
-const ROBOT_AREA_CM2: f64 = 20.0 * 17.0;  // ~340.0
-// Допустимая погрешность площади (в процентах, т.к. ракурс может искажать)
-const AREA_TOLERANCE_PCT: f64 = 0.40; // +/- 40%
+// Ожидаемые площади объектов (в см^2) для разделения робота и кубиков
+const OBSTACLE_AREA_CM2: f64 = 8.5 * 8.5; // ~72.2 см^2
+const ROBOT_AREA_CM2: f64 = 20.0 * 17.0;  // ~340.0 см^2
+const AREA_TOLERANCE_PCT: f64 = 0.40;     // Погрешность +/- 40%
 
-// Функция поиска центра цветного маркера (для ориентации робота)
-fn get_marker_point(
+// Функция для поиска цветных точек ориентации (синей и розовой)
+fn get_orientation_marker(
     frame: &core::Mat,
     lower_bound: core::Scalar,
     upper_bound: core::Scalar,
@@ -32,7 +31,7 @@ fn get_marker_point(
     let mut best_idx = -1;
     for i in 0..contours.len() {
         let area = imgproc::contour_area(&contours.get(i)?, false)?;
-        if area > max_area && area > 20.0 { // Метки мелкие, порог ниже
+        if area > max_area && area > 15.0 {
             max_area = area;
             best_idx = i as i32;
         }
@@ -48,57 +47,57 @@ fn get_marker_point(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Настройка сети
+    // Настройка сети (Твой текущий рабочий IP робота)
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
-    let robot_ip = "192.168.1.100:9999"; // IP Raspberry Pi на роботе
-    println!("📡 Геометрический трекер запущен. Данные на {}", robot_ip);
+    let robot_ip = "192.168.1.107:8888"; 
+    println!("📡 Система трекинга стенда запущена. Отправка данных на {}", robot_ip);
 
-    // Подключение камеры (Ubuntu, V4L2, пробуем индекс 0 или 1)
-    let mut cap = videoio::VideoCapture::new(0, videoio::CAP_V4L2)?; 
+    // СТРОГО ТВОЙ РАБОЧИЙ ЗАПУСК КАМЕРЫ ДЛЯ МАКБУКА
+    let mut cap = videoio::VideoCapture::new(0, videoio::CAP_AVFOUNDATION)?;
     if !cap.is_opened()? {
-        println!("❌ ОШИБКА: Камера на индексе 0 недоступна.");
+        println!("❌ ОШИБКА: Камера недоступна.");
         return Ok(());
     }
 
-    // Коэффициенты масштаба (см/пиксель)
+    // Берём разрешение кадра
     let frame_width = cap.get(videoio::CAP_PROP_FRAME_WIDTH)? as f64;
     let frame_height = cap.get(videoio::CAP_PROP_FRAME_HEIGHT)? as f64;
+    
+    // Перевод пикселей в сантиметры
     let px_to_cm_x = ARENA_LENGTH_CM / frame_width;
     let px_to_cm_y = ARENA_WIDTH_CM / frame_height;
-    // Средний коэффициент для расчета площади
     let px2_to_cm2 = px_to_cm_x * px_to_cm_y; 
 
-    println!("📐 Камера: {:.0}x{:.0} px. Масштаб площади: 1px^2 = {:.4}см^2", 
+    println!("📐 Стенд откалиброван: {:.0}x{:.0} px. Масштаб площади: 1px^2 = {:.4}см^2", 
               frame_width, frame_height, px2_to_cm2);
 
-    highgui::named_window("Geometric Stand Tracker (Ubuntu)", highgui::WINDOW_AUTOSIZE)?;
+    highgui::named_window("Brain Tracker", highgui::WINDOW_AUTOSIZE)?;
     
     let mut frame = core::Mat::default();
     let mut black_mask = core::Mat::default();
 
-    // --- НАСТРОЙКИ (HSV) ---
-    // 1. Фильтр для ЧЁРНЫХ объектов на ЗЕЛЁНОМ фоне.
-    // Мы берем весь диапазон цветов (0-180), любую насыщенность (0-255), 
-    // но ограничиваем яркость (Value) низким значением, чтобы найти тёмное.
+    // --- НАСТРОЙКИ ФИЛЬТРОВ (HSV) ---
+    // 1. Ищем ЧЁРНЫЕ объекты (робот и кубики) на ЗЕЛЁНОМ поле. Любой цвет, низкая яркость (Value < 65)
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 255.0, 70.0, 0.0); // Яркость < 70 из 255
+    let upper_black = Scalar::new(180.0, 255.0, 65.0, 0.0);
 
-    // 2. Маркеры сверху робота (для ориентации, клеить обязательно!)
+    // 2. Метки направления сверху чёрного робота (синяя и розовая)
     let lower_blue = Scalar::new(100.0, 100.0, 50.0, 0.0);
     let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
-    let lower_pink = Scalar::new(150.0, 100.0, 50.0, 0.0);
-    let upper_pink = Scalar::new(180.0, 255.0, 255.0, 0.0);
+    
+    let lower_pink = Scalar::new(155.0, 50.0, 50.0, 0.0);
+    let upper_pink = Scalar::new(185.0, 255.0, 255.0, 0.0);
 
     loop {
         cap.read(&mut frame)?;
         if frame.empty() { continue; }
 
-        // ШАГ 1: Находим все чёрные контуры
+        // Фильтруем чёрный цвет
         let mut hsv = core::Mat::default();
         imgproc::cvt_color_def(&frame, &mut hsv, imgproc::COLOR_BGR2HSV)?;
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
-        // Морфология для очистки маски от шумов (теней на поле)
+        // Очистка шумов/теней на поле
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
         imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 1, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
@@ -109,69 +108,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut obstacles_vector = Vec::new();
         let mut robot_packet = "RB:none".to_string();
-
-        // Переменные для хранения прямоугольника робота
         let mut robot_rect_px: Option<Rect> = None;
 
-        // ШАГ 2: Классификация контуров по площади
+        // Перебираем всё чёрное, что нашли на поле
         for i in 0..contours.len() {
             let contour = contours.get(i)?;
             let area_px = imgproc::contour_area(&contour, false)?;
-            let area_cm2 = area_px * px2_to_cm2; // Перевод в см^2
+            let area_cm2 = area_px * px2_to_cm2;
 
-            // Проверка на препятствие (~72 см^2)
+            // Если размер пятна похож на кубик 8.5х8.5 см (~72 см^2)
             if area_cm2 > OBSTACLE_AREA_CM2 * (1.0 - AREA_TOLERANCE_PCT) && 
                area_cm2 < OBSTACLE_AREA_CM2 * (1.0 + AREA_TOLERANCE_PCT) {
                 
                 let rect = imgproc::bounding_rect(&contour)?;
-                let center_cm_x = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
-                let center_cm_y = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
-                obstacles_vector.push(format!("{:.1},{:.1}", center_cm_x, center_cm_y));
+                let cx = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
+                let cy = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
+                obstacles_vector.push(format!("{:.1},{:.1}", cx, cy));
 
-                // Отрисовка препятствия красным
+                // Рисуем красный квадрат вокруг препятствия
                 imgproc::rectangle(&mut frame, rect, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
             
-            // Проверка на робота (~340 см^2)
+            // Если размер пятна похож на робота 20х17 см (~340 см^2)
             } else if area_cm2 > ROBOT_AREA_CM2 * (1.0 - AREA_TOLERANCE_PCT) && 
                       area_cm2 < ROBOT_AREA_CM2 * (1.0 + AREA_TOLERANCE_PCT) {
                 
                 let rect = imgproc::bounding_rect(&contour)?;
-                robot_rect_px = Some(rect); // Сохраняем прямоугольник для отрисовки
+                robot_rect_px = Some(rect);
 
-                let center_cm_x = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
-                let center_cm_y = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
-                robot_packet = format!("RB:{:.1},{:.1}", center_cm_x, center_cm_y);
+                let cx = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
+                let cy = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
+                robot_packet = format!("RB:{:.1},{:.1}", cx, cy);
             }
         }
 
-        // ШАГ 3: Определение ориентации робота (используем цветные метки сверху)
-        let front_marker = get_marker_point(&frame, lower_blue, upper_blue)?;
-        let rear_marker = get_marker_point(&frame, lower_pink, upper_pink)?;
+        // Ищем метки направления сверху робота
+        let front_marker = get_orientation_marker(&frame, lower_blue, upper_blue)?;
+        let rear_marker = get_orientation_marker(&frame, lower_pink, upper_pink)?;
 
+        // Отрисовка робота на экране
         if let (Some(r_rect), Some(front), Some(rear)) = (robot_rect_px, front_marker, rear_marker) {
-            // Отрисовка робота зелёным боксом
             imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            // Отрисовка вектора направления
             imgproc::line(&mut frame, rear, front, Scalar::new(255.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            imgproc::circle(&mut frame, front, 5, Scalar::new(255.0, 0.0, 0.0, 0.0), -1, imgproc::LINE_8, 0)?; // Нос синий
-        } else if robot_rect_px.is_some() {
-             imgproc::rectangle(&mut frame, robot_rect_px.unwrap(), Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
-             // Предупреждение если робот виден, а метки нет
-             imgproc::put_text(&mut frame, "⚠️ NO MARKERS", Point::new(r_rect.x, r_rect.y - 5), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 0.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
+            imgproc::circle(&mut frame, front, 6, Scalar::new(255.0, 0.0, 0.0, 0.0), -1, imgproc::LINE_8, 0)?; // Нос
+        } else if let Some(r_rect) = robot_rect_px {
+            imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
+            imgproc::put_text(&mut frame, "⚠️ NO DIRECTION MARKERS", Point::new(r_rect.x, r_rect.y - 5), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 0.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
         }
 
-        // Формирование пакета
+        // Собираем пакет данных: "RB:х,у;OB:х1,у1|х2,у2"
         let obstacles_packet = if obstacles_vector.is_empty() { "OB:none".to_string() } else { format!("OB:{}", obstacles_vector.join("|")) };
         let final_packet = format!("{};{}\n", robot_packet, obstacles_packet);
+        
+        // Отправляем телеметрию на робота
         let _ = socket.send_to(final_packet.as_bytes(), robot_ip);
 
-        // Вывод на экран
+        // Вывод инфы на экран
         imgproc::put_text(&mut frame, &final_packet.trim(), Point::new(10, 30), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
-        highgui::imshow("Geometric Stand Tracker (Ubuntu)", &frame)?;
-        // Расскомментируй, чтобы видеть чёрную маску для отладки
-        // highgui::imshow("Debug: Black Mask", &black_mask)?;
+        
+        highgui::imshow("Brain Tracker", &frame)?;
 
-        if highgui::wait_key(1)? == 113 { break; } // 'q'
+        if highgui::wait_key(1)? == 113 { // 'q'
+            break;
+        }
     }
+
     Ok(())
 }
