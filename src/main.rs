@@ -73,10 +73,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut black_mask = core::Mat::default();
 
     // --- АНТИ-ТЕНЬ НАСТРОЙКИ (HSV) ---
-    // Чтобы отсечь тени, мы уменьшаем верхний порог Насыщенности (S) с 255 до 80.
-    // Тень на зеленом поле будет иметь высокую насыщенность зеленого, а робот — низкую.
+    // Снизили V до 45 и S до 60, чтобы жестко отсекать зеленые и серые тени
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 80.0, 70.0, 0.0); // S < 80 (нет цвета), V < 70 (темно)
+    let upper_black = Scalar::new(180.0, 60.0, 45.0, 0.0); 
 
     // Цвета маркеров направления на крыше робота
     let lower_blue = Scalar::new(100.0, 100.0, 50.0, 0.0);
@@ -92,11 +91,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgproc::cvt_color_def(&frame, &mut hsv, imgproc::COLOR_BGR2HSV)?;
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
-        // Фильтры очистки маски
+        // --- УНИЧТОЖИТЕЛЬ ТЕНЕЙ (Морфология) ---
+        // Увеличили Эрозию до 3 и Дилатацию до 4, чтобы съедать тонкие складки на ткани
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
-        imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 1, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
-        imgproc::dilate(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 3, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        imgproc::dilate(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 4, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
         let mut contours = Vector::<Vector<Point>>::new();
         imgproc::find_contours(&mut black_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
@@ -112,8 +112,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let rect = imgproc::bounding_rect(&contour)?;
 
-            // ИГНОРИРУЕМ СОВСЕМ МЕЛКИЙ МУСОР (меньше 15 см^2)
-            if area_cm2 < 15.0 { continue; }
+            // --- ОБРЕЗКА КРАЕВ (Margin) ---
+            // Игнорируем объекты, которые касаются краев кадра (стены, пол)
+            let margin = 15; 
+            if rect.x < margin || rect.y < margin || 
+               rect.x + rect.width > frame_width as i32 - margin || 
+               rect.y + rect.height > frame_height as i32 - margin {
+                continue; 
+            }
+
+            // ИГНОРИРУЕМ СОВСЕМ МЕЛКИЙ МУСОР (меньше 45 см^2)
+            if area_cm2 < 45.0 { continue; }
 
             // Классификация 1: Препятствие
             if area_cm2 >= MIN_OBSTACLE_AREA && area_cm2 <= MAX_OBSTACLE_AREA {
