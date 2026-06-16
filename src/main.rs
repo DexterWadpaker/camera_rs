@@ -8,13 +8,9 @@ use std::net::UdpSocket;
 const ARENA_LENGTH_CM: f64 = 142.0; 
 const ARENA_WIDTH_CM: f64 = 77.0;   
 
-// --- НАСТРОЙКА ПЛОЩАДЕЙ (Калибруй эти числа по экрану!) ---
-// Для кубика (базовый 72.2 см^2): пусть ловит в диапазоне от 30 до 140
 const MIN_OBSTACLE_AREA: f64 = 30.0;
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-
-// Для робота (базовый 340 см^2): расширяем нижний порог, так как на полу он кажется меньше
-const MIN_ROBOT_AREA: f64 = 150.0; // Если на полу всё равно не видит, опусти до 100
+const MIN_ROBOT_AREA: f64 = 150.0; 
 const MAX_ROBOT_AREA: f64 = 500.0;
 
 fn get_orientation_marker(
@@ -52,13 +48,32 @@ fn get_orientation_marker(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен. Анализ геометрии стенда...");
+    println!("📡 Умный трекер запущен. Поиск оборудования...");
 
-    let mut cap = videoio::VideoCapture::new(0, videoio::CAP_V4L2)?;
-    if !cap.is_opened()? {
-        println!("❌ ОШИБКА: Камера недоступна.");
-        return Ok(());
+    // УНИВЕРСАЛЬНЫЙ АВТОСКАНЕР КАМЕР (Без предупреждений компилятора)
+    let mut cap_opt = None;
+    println!("🔍 Запуск автосканирования видео-узлов...");
+    
+    for index in 0..6 {
+        // Используем CAP_ANY для работы и на Mac, и на Linux
+        if let Ok(try_cap) = videoio::VideoCapture::new(index, videoio::CAP_ANY) {
+            if let Ok(opened) = try_cap.is_opened() {
+                if opened {
+                    println!("✅ КАМЕРА УСПЕШНО НАЙДЕНА! Индекс: {}", index);
+                    cap_opt = Some(try_cap);
+                    break;
+                }
+            }
+        }
     }
+
+    let mut cap = match cap_opt {
+        Some(c) => c,
+        None => {
+            println!("❌ ОШИБКА: OpenCV не смог подключиться ни к одной камере.");
+            return Ok(());
+        }
+    };
 
     let frame_width = cap.get(videoio::CAP_PROP_FRAME_WIDTH)? as f64;
     let frame_height = cap.get(videoio::CAP_PROP_FRAME_HEIGHT)? as f64;
@@ -72,12 +87,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = core::Mat::default();
     let mut black_mask = core::Mat::default();
 
-    // --- АНТИ-ТЕНЬ НАСТРОЙКИ (HSV) ---
-    // Снизили V до 45 и S до 60, чтобы жестко отсекать зеленые и серые тени
+    // Экстремальный фильтр черного для подавления теней
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 60.0, 45.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 40.0, 35.0, 0.0); 
 
-    // Цвета маркеров направления на крыше робота
     let lower_blue = Scalar::new(100.0, 100.0, 50.0, 0.0);
     let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
     let lower_pink = Scalar::new(155.0, 50.0, 50.0, 0.0);
@@ -87,12 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cap.read(&mut frame)?;
         if frame.empty() { continue; }
 
+        // --- ИСПРАВЛЕННОЕ РАЗМЫТИЕ (Гасит текстуры и складки) ---
+        let mut blurred = core::Mat::default();
+        imgproc::gaussian_blur_def(&frame, &mut blurred, core::Size::new(7, 7), 0.0)?;
+
         let mut hsv = core::Mat::default();
-        imgproc::cvt_color_def(&frame, &mut hsv, imgproc::COLOR_BGR2HSV)?;
+        imgproc::cvt_color_def(&blurred, &mut hsv, imgproc::COLOR_BGR2HSV)?;
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
-        // --- УНИЧТОЖИТЕЛЬ ТЕНЕЙ (Морфология) ---
-        // Увеличили Эрозию до 3 и Дилатацию до 4, чтобы съедать тонкие складки на ткани
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
         imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 3, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
@@ -109,11 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let contour = contours.get(i)?;
             let area_px = imgproc::contour_area(&contour, false)?;
             let area_cm2 = area_px * px2_to_cm2;
-
             let rect = imgproc::bounding_rect(&contour)?;
 
-            // --- ОБРЕЗКА КРАЕВ (Margin) ---
-            // Игнорируем объекты, которые касаются краев кадра (стены, пол)
             let margin = 15; 
             if rect.x < margin || rect.y < margin || 
                rect.x + rect.width > frame_width as i32 - margin || 
@@ -121,33 +133,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue; 
             }
 
-            // ИГНОРИРУЕМ СОВСЕМ МЕЛКИЙ МУСОР (меньше 45 см^2)
-            if area_cm2 < 45.0 { continue; }
+            if area_cm2 < 15.0 { continue; }
 
-            // Классификация 1: Препятствие
             if area_cm2 >= MIN_OBSTACLE_AREA && area_cm2 <= MAX_OBSTACLE_AREA {
                 let cx = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
                 let cy = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
                 obstacles_vector.push(format!("{:.1},{:.1}", cx, cy));
                 imgproc::rectangle(&mut frame, rect, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
                 imgproc::put_text(&mut frame, &format!("{:.0} cm2", area_cm2), Point::new(rect.x, rect.y - 5), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, Scalar::new(0.0, 0.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
-            
-            // Классификация 2: Робот
             } else if area_cm2 >= MIN_ROBOT_AREA && area_cm2 <= MAX_ROBOT_AREA {
                 robot_rect_px = Some(rect);
                 let cx = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
                 let cy = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
                 robot_packet = format!("RB:{:.1},{:.1}", cx, cy);
                 imgproc::put_text(&mut frame, &format!("ROBOT: {:.0} cm2", area_cm2), Point::new(rect.x, rect.y - 5), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 0.0, 0.0), 1, imgproc::LINE_8, false)?;
-            
-            // Отладка: Если объект не подошел ни под что, рисуем его серым и пишем его площадь!
             } else {
                 imgproc::rectangle(&mut frame, rect, Scalar::new(128.0, 128.0, 128.0, 0.0), 1, imgproc::LINE_8, 0)?;
                 imgproc::put_text(&mut frame, &format!("? {:.0} cm2", area_cm2), Point::new(rect.x, rect.y + 15), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, Scalar::new(128.0, 128.0, 128.0, 0.0), 1, imgproc::LINE_8, false)?;
             }
         }
 
-        // Поиск цветных меток направления
         let front_marker = get_orientation_marker(&frame, lower_blue, upper_blue)?;
         let rear_marker = get_orientation_marker(&frame, lower_pink, upper_pink)?;
 
