@@ -4,14 +4,14 @@ use opencv::{
 };
 use std::net::UdpSocket;
 
-// Размеры стенда в сантиметрах
 const ARENA_LENGTH_CM: f64 = 142.0; 
 const ARENA_WIDTH_CM: f64 = 77.0;   
 
-const MIN_OBSTACLE_AREA: f64 = 30.0;
+// Чуть расширили минимальные пороги, чтобы ловить кубики, если они кажутся меньше
+const MIN_OBSTACLE_AREA: f64 = 20.0;
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-const MIN_ROBOT_AREA: f64 = 150.0; 
-const MAX_ROBOT_AREA: f64 = 500.0;
+const MIN_ROBOT_AREA: f64 = 100.0; 
+const MAX_ROBOT_AREA: f64 = 600.0;
 
 fn get_orientation_marker(
     frame: &core::Mat,
@@ -48,18 +48,14 @@ fn get_orientation_marker(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен. Поиск оборудования...");
+    println!("📡 Система трекинга стенда запущена...");
 
-    // УНИВЕРСАЛЬНЫЙ АВТОСКАНЕР КАМЕР (Без предупреждений компилятора)
     let mut cap_opt = None;
-    println!("🔍 Запуск автосканирования видео-узлов...");
-    
     for index in 0..6 {
-        // Используем CAP_ANY для работы и на Mac, и на Linux
         if let Ok(try_cap) = videoio::VideoCapture::new(index, videoio::CAP_ANY) {
             if let Ok(opened) = try_cap.is_opened() {
                 if opened {
-                    println!("✅ КАМЕРА УСПЕШНО НАЙДЕНА! Индекс: {}", index);
+                    println!("✅ КАМЕРА НА ИНДЕКСЕ: {}", index);
                     cap_opt = Some(try_cap);
                     break;
                 }
@@ -69,10 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cap = match cap_opt {
         Some(c) => c,
-        None => {
-            println!("❌ ОШИБКА: OpenCV не смог подключиться ни к одной камере.");
-            return Ok(());
-        }
+        None => return Ok(()),
     };
 
     let frame_width = cap.get(videoio::CAP_PROP_FRAME_WIDTH)? as f64;
@@ -82,14 +75,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let px_to_cm_y = ARENA_WIDTH_CM / frame_height;
     let px2_to_cm2 = px_to_cm_x * px_to_cm_y; 
 
+    // Открываем ДВА окна: Основное и Черно-белую маску для отладки
     highgui::named_window("Brain Tracker", highgui::WINDOW_AUTOSIZE)?;
+    highgui::named_window("Debug: Black Mask", highgui::WINDOW_AUTOSIZE)?;
     
     let mut frame = core::Mat::default();
     let mut black_mask = core::Mat::default();
 
-    // Экстремальный фильтр черного для подавления теней
+    // --- РАССЛАБЛЯЕМ ФИЛЬТР ЧЕРНОГО ---
+    // Повысили S (насыщенность) до 100 и V (яркость) до 90. 
+    // Теперь камера увидит темно-серый пластик и блики на роботе.
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 40.0, 35.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 100.0, 90.0, 0.0); 
 
     let lower_blue = Scalar::new(100.0, 100.0, 50.0, 0.0);
     let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
@@ -100,7 +97,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cap.read(&mut frame)?;
         if frame.empty() { continue; }
 
-        // --- ИСПРАВЛЕННОЕ РАЗМЫТИЕ (Гасит текстуры и складки) ---
         let mut blurred = core::Mat::default();
         imgproc::gaussian_blur_def(&frame, &mut blurred, core::Size::new(7, 7), 0.0)?;
 
@@ -110,7 +106,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
-        imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 3, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        // Эрозия 2, Дилатация 4 (сглаживаем края, чтобы кубики были цельными)
+        imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
         imgproc::dilate(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 4, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
         let mut contours = Vector::<Vector<Point>>::new();
@@ -168,7 +165,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = socket.send_to(final_packet.as_bytes(), robot_ip);
 
         imgproc::put_text(&mut frame, &final_packet.trim(), Point::new(10, 30), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
+        
+        // ВЫВОДИМ ОБА ОКНА НА ЭКРАН
         highgui::imshow("Brain Tracker", &frame)?;
+        highgui::imshow("Debug: Black Mask", &black_mask)?; // ИМЕННО ЗДЕСЬ МЫ ВИДИМ, ЧТО КАМЕРА СЧИТАЕТ "ЧЕРНЫМ"
 
         if highgui::wait_key(1)? == 113 { break; }
     }
