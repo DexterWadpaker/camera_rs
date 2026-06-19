@@ -9,20 +9,23 @@ const ARENA_WIDTH_CM: f64 = 77.0;
 
 const MIN_OBSTACLE_AREA: f64 = 20.0;
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-
-// Радиус радара вокруг робота СМ
 const DETECTION_RADIUS_CM: f64 = 20.0;
 
+// НОВОЕ: Добавили window_name, чтобы выводить маску нужного цвета на экран
 fn get_orientation_marker(
     frame: &core::Mat,
     lower_bound: core::Scalar,
     upper_bound: core::Scalar,
+    window_name: &str,
 ) -> CvResult<Option<Point>> {
     let mut hsv = core::Mat::default();
     imgproc::cvt_color_def(frame, &mut hsv, imgproc::COLOR_BGR2HSV)?;
     let mut mask = core::Mat::default();
     core::in_range(&hsv, &lower_bound, &upper_bound, &mut mask)?;
     
+    // Выводим маску цвета на экран, чтобы ты видел, ловится ли цвет!
+    highgui::imshow(window_name, &mask)?;
+
     let mut contours = Vector::<Vector<Point>>::new();
     imgproc::find_contours(&mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
 
@@ -47,7 +50,7 @@ fn get_orientation_marker(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
-    let robot_ip = "192.168.1.107:5000";
+    let robot_ip = "192.168.1.107:8888"; 
     println!("📡 Умный трекер запущен. Передача по UDP на {}", robot_ip);
 
     let mut cap_opt = None;
@@ -77,6 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     highgui::named_window("Brain Tracker", highgui::WINDOW_AUTOSIZE)?;
     highgui::named_window("Debug: Black Mask", highgui::WINDOW_AUTOSIZE)?;
+    // Создаем окна для отладки цветов
+    highgui::named_window("Debug: BLUE", highgui::WINDOW_AUTOSIZE)?;
+    highgui::named_window("Debug: PINK", highgui::WINDOW_AUTOSIZE)?;
     
     let mut frame = core::Mat::default();
     let mut black_mask = core::Mat::default();
@@ -84,10 +90,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
     let upper_black = Scalar::new(180.0, 80.0, 60.0, 0.0); 
 
-    let lower_blue = Scalar::new(100.0, 100.0, 50.0, 0.0);
+    // Расширили диапазоны цветов для меток робота
+    let lower_blue = Scalar::new(90.0, 50.0, 50.0, 0.0);
     let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
-    let lower_pink = Scalar::new(155.0, 50.0, 50.0, 0.0);
-    let upper_pink = Scalar::new(185.0, 255.0, 255.0, 0.0);
+    let lower_pink = Scalar::new(140.0, 50.0, 50.0, 0.0);
+    let upper_pink = Scalar::new(180.0, 255.0, 255.0, 0.0);
 
     loop {
         cap.read(&mut frame)?;
@@ -105,12 +112,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
         imgproc::dilate(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 4, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
-        // ИЩЕМ РОБОТА
-        let front_marker = get_orientation_marker(&frame, lower_blue, upper_blue)?;
-        let rear_marker = get_orientation_marker(&frame, lower_pink, upper_pink)?;
+        // 1. ИЩЕМ РОБОТА ПО ЦВЕТАМ (Теперь функция выведет маски на экран)
+        let front_marker = get_orientation_marker(&frame, lower_blue, upper_blue, "Debug: BLUE")?;
+        let rear_marker = get_orientation_marker(&frame, lower_pink, upper_pink, "Debug: PINK")?;
         let mut robot_packet = "RB:none".to_string();
         
-        // Переменные для хранения координат робота
         let mut robot_cx_cm = 0.0;
         let mut robot_cy_cm = 0.0;
         let mut robot_found = false;
@@ -124,16 +130,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             robot_found = true;
             robot_packet = format!("RB:{:.1},{:.1}", robot_cx_cm, robot_cy_cm);
 
-            // Рисуем радиус обнаружения вокруг робота
-            let radius_px = (DETECTION_RADIUS_CM / px_to_cm_x) as i32; // примерный перевод радиуса в пиксели
+            let radius_px = (DETECTION_RADIUS_CM / px_to_cm_x) as i32; 
             imgproc::circle(&mut frame, Point::new(center_x, center_y), radius_px, Scalar::new(0.0, 255.0, 0.0, 0.0), 1, imgproc::LINE_8, 0)?;
             
-            // Центр и вектор
             imgproc::circle(&mut frame, Point::new(center_x, center_y), 5, Scalar::new(0.0, 255.0, 0.0, 0.0), -1, imgproc::LINE_8, 0)?;
             imgproc::line(&mut frame, rear, front, Scalar::new(255.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
+        } else {
+            imgproc::put_text(&mut frame, "⚠️ ROBOT MARKERS NOT FOUND", Point::new(10, 60), imgproc::FONT_HERSHEY_SIMPLEX, 0.6, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, false)?;
         }
 
-        // ИЩЕМ ПРЕПЯТСТВИЯ И ФИЛЬТРУЕМ ИХ ПО ДИСТАНЦИИ
+        // 2. ИЩЕМ ПРЕПЯТСТВИЯ 
         let mut contours = Vector::<Vector<Point>>::new();
         imgproc::find_contours(&mut black_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
         let mut obstacles_vector = Vec::new();
@@ -157,32 +163,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let obs_cy_cm = (rect.y + rect.height / 2) as f64 * px_to_cm_y;
 
                 if robot_found {
-                    // Считаем дистанцию от робота до кубика
                     let dx = obs_cx_cm - robot_cx_cm;
                     let dy = obs_cy_cm - robot_cy_cm;
                     let distance = (dx * dx + dy * dy).sqrt();
 
                     if distance <= DETECTION_RADIUS_CM {
-                        // Кубик близко! Обводим красным и добавляем в пакет на отправку
                         obstacles_vector.push(format!("{:.1},{:.1}", obs_cx_cm, obs_cy_cm));
                         imgproc::rectangle(&mut frame, rect, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
                         imgproc::put_text(&mut frame, &format!("{:.1}cm", distance), Point::new(rect.x, rect.y - 5), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, Scalar::new(0.0, 0.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
                     } else {
-                        // Кубик далеко. Обводим серым, игнорируем
                         imgproc::rectangle(&mut frame, rect, Scalar::new(128.0, 128.0, 128.0, 0.0), 1, imgproc::LINE_8, 0)?;
                     }
                 } else {
-                    // Если робот не найден, просто рисуем кубики серым, но никуда не отправляем
                     imgproc::rectangle(&mut frame, rect, Scalar::new(128.0, 128.0, 128.0, 0.0), 1, imgproc::LINE_8, 0)?;
                 }
             }
         }
 
-        // ОТПРАВКА ДАННЫХ
         let obstacles_packet = if obstacles_vector.is_empty() { "OB:none".to_string() } else { format!("OB:{}", obstacles_vector.join("|")) };
         let final_packet = format!("{};{}\n", robot_packet, obstacles_packet);
-        
-        // Отправка строго по UDP для максимальной скорости и минимального лага
         let _ = socket.send_to(final_packet.as_bytes(), robot_ip);
 
         imgproc::put_text(&mut frame, &final_packet.trim(), Point::new(10, 30), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
