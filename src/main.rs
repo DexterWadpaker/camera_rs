@@ -9,51 +9,15 @@ const ARENA_WIDTH_CM: f64 = 77.0;
 
 const MIN_OBSTACLE_AREA: f64 = 15.0; 
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-const MIN_ROBOT_AREA: f64 = 70.0;
+const MIN_ROBOT_AREA: f64 = 80.0; 
 const MAX_ROBOT_AREA: f64 = 700.0;
+
 const DETECTION_RADIUS_CM: f64 = 20.0;
-
-fn get_orientation_marker(
-    frame: &core::Mat,
-    lower_bound: core::Scalar,
-    upper_bound: core::Scalar,
-    window_name: &str,
-) -> CvResult<Option<Point>> {
-    let mut hsv = core::Mat::default();
-    imgproc::cvt_color_def(frame, &mut hsv, imgproc::COLOR_BGR2HSV)?;
-    let mut mask = core::Mat::default();
-    core::in_range(&hsv, &lower_bound, &upper_bound, &mut mask)?;
-    
-    highgui::imshow(window_name, &mask)?;
-
-    let mut contours = Vector::<Vector<Point>>::new();
-    imgproc::find_contours(&mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
-
-    let mut max_area = 0.0;
-    let mut best_idx = -1;
-    for i in 0..contours.len() {
-        let area = imgproc::contour_area(&contours.get(i)?, false)?;
-        if area > 10.0 && area < 500.0 {
-            if area > max_area {
-                max_area = area;
-                best_idx = i as i32;
-            }
-        }
-    }
-
-    if best_idx >= 0 {
-        let moments = imgproc::moments(&contours.get(best_idx as usize)?, false)?;
-        if moments.m00 != 0.0 {
-            return Ok(Some(Point::new((moments.m10 / moments.m00) as i32, (moments.m01 / moments.m00) as i32)));
-        }
-    }
-    Ok(None)
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен. Подавление теней включено.");
+    println!("📡 Умный трекер запущен. Режим: Слияние Черного и Синего силуэтов.");
 
     let mut cap_opt = None;
     for index in 0..6 {
@@ -81,22 +45,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let px2_to_cm2 = px_to_cm_x * px_to_cm_y; 
 
     highgui::named_window("Brain Tracker", highgui::WINDOW_AUTOSIZE)?;
-    highgui::named_window("Debug: Black Mask", highgui::WINDOW_AUTOSIZE)?;
-    highgui::named_window("Debug: BLUE", highgui::WINDOW_AUTOSIZE)?;
-    highgui::named_window("Debug: PINK", highgui::WINDOW_AUTOSIZE)?;
+    highgui::named_window("Debug: Combined Mask", highgui::WINDOW_AUTOSIZE)?;
     
     let mut frame = core::Mat::default();
-    let mut black_mask = core::Mat::default();
 
-    // Снижаем S до 50
+    // ФИЛЬТР ЧЕРНОГО (Гусеницы, тени под роботом, черные кубики)
+    // Оставили V до 70, чтобы не цеплять зеленую траву
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 50.0, 60.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 255.0, 70.0, 0.0); 
 
-    // Расширяем цвета для темных маркеров на роботе
-    let lower_blue = Scalar::new(90.0, 80.0, 50.0, 0.0);
-    let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
-    let lower_pink = Scalar::new(140.0, 80.0, 50.0, 0.0);
-    let upper_pink = Scalar::new(180.0, 255.0, 255.0, 0.0);
+    // ФИЛЬТР СИНИХ БЛИКОВ (Отражающий пластик корпуса)
+    // H: 90-140 (Синий спектр)
+    // S: 40-255 (Любая насыщенность)
+    // V: 40-150 (Разрешаем ему быть гораздо светлее черного, чтобы поймать блик от окна)
+    let lower_blue_glare = Scalar::new(90.0, 40.0, 40.0, 0.0);
+    let upper_blue_glare = Scalar::new(140.0, 255.0, 150.0, 0.0);
 
     loop {
         cap.read(&mut frame)?;
@@ -107,25 +70,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut hsv = core::Mat::default();
         imgproc::cvt_color_def(&blurred, &mut hsv, imgproc::COLOR_BGR2HSV)?;
+
+        // Создаем две отдельные маски
+        let mut black_mask = core::Mat::default();
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
-        // СКЛЕИВАЕМ РОБОТА
+        let mut blue_mask = core::Mat::default();
+        core::in_range(&hsv, &lower_blue_glare, &upper_blue_glare, &mut blue_mask)?;
+
+        // СЛИЯНИЕ: Складываем черное и синее в одну общую картинку
+        let mut combined_mask = core::Mat::default();
+        core::bitwise_or(&black_mask, &blue_mask, &mut combined_mask, &core::Mat::default())?;
+
+        // СКЛЕИВАЕМ СИЛУЭТ (Завариваем швы между синим пластиком и черными гусеницами)
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
-        // расширяем чтобы проглотить белые провода на шасси
-        imgproc::dilate(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 6, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
-        // сужаем чтобы убрать мелкий мусор по краям
-        imgproc::erode(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        imgproc::dilate(&combined_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 6, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        imgproc::erode(&temp_mask, &mut combined_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
         let mut contours = Vector::<Vector<Point>>::new();
-        imgproc::find_contours(&mut black_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
+        // Ищем контуры уже по нашей ОБЪЕДИНЕННОЙ маске
+        imgproc::find_contours(&mut combined_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
 
         let mut robot_packet = "RB:none".to_string();
         let mut robot_found = false;
         let mut robot_cx_cm = 0.0;
         let mut robot_cy_cm = 0.0;
         
-        let mut best_fallback_rect: Option<Rect> = None;
+        let mut best_robot_rect: Option<Rect> = None;
         let mut max_robot_area = 0.0;
         let mut raw_obstacles = Vec::new();
 
@@ -145,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if area_cm2 >= MIN_ROBOT_AREA && area_cm2 <= MAX_ROBOT_AREA {
                 if area_cm2 > max_robot_area {
                     max_robot_area = area_cm2;
-                    best_fallback_rect = Some(rect);
+                    best_robot_rect = Some(rect);
                 }
             } else if area_cm2 >= MIN_OBSTACLE_AREA && area_cm2 <= MAX_OBSTACLE_AREA {
                 let obs_cx_cm = (rect.x + rect.width / 2) as f64 * px_to_cm_x;
@@ -154,36 +126,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let front_marker = get_orientation_marker(&frame, lower_blue, upper_blue, "Debug: BLUE")?;
-        let rear_marker = get_orientation_marker(&frame, lower_pink, upper_pink, "Debug: PINK")?;
-
-        if let (Some(front), Some(rear)) = (front_marker, rear_marker) {
-            let cx = (front.x + rear.x) / 2;
-            let cy = (front.y + rear.y) / 2;
-            robot_cx_cm = cx as f64 * px_to_cm_x;
-            robot_cy_cm = cy as f64 * px_to_cm_y;
+        if let Some(r_rect) = best_robot_rect {
+            robot_cx_cm = (r_rect.x + r_rect.width / 2) as f64 * px_to_cm_x;
+            robot_cy_cm = (r_rect.y + r_rect.height / 2) as f64 * px_to_cm_y;
             robot_found = true;
 
-            imgproc::line(&mut frame, rear, front, Scalar::new(255.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            imgproc::circle(&mut frame, front, 5, Scalar::new(255.0, 0.0, 0.0, 0.0), -1, imgproc::LINE_8, 0)?;
-            
-            if let Some(r_rect) = best_fallback_rect {
-                imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            }
-        } 
-        else if let Some(r_rect) = best_fallback_rect {
-            let cx = r_rect.x + r_rect.width / 2;
-            let cy = r_rect.y + r_rect.height / 2;
-            robot_cx_cm = cx as f64 * px_to_cm_x;
-            robot_cy_cm = cy as f64 * px_to_cm_y;
-            robot_found = true;
+            imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
+            imgproc::put_text(&mut frame, "ROBOT (BLK+BLU)", Point::new(r_rect.x, r_rect.y - 10), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, false)?;
 
-            imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            imgproc::put_text(&mut frame, "TRACKING: CHASSIS ONLY", Point::new(r_rect.x, r_rect.y - 10), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 255.0, 0.0), 2, imgproc::LINE_8, false)?;
-        }
-
-        if robot_found {
             robot_packet = format!("RB:{:.1},{:.1}", robot_cx_cm, robot_cy_cm);
+
             let cx_px = (robot_cx_cm / px_to_cm_x) as i32;
             let cy_px = (robot_cy_cm / px_to_cm_y) as i32;
             let radius_px = (DETECTION_RADIUS_CM / px_to_cm_x) as i32; 
@@ -219,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgproc::rectangle(&mut frame, safe_zone, Scalar::new(0.0, 100.0, 255.0, 0.0), 1, imgproc::LINE_8, 0)?;
 
         highgui::imshow("Brain Tracker", &frame)?;
-        highgui::imshow("Debug: Black Mask", &black_mask)?;
+        highgui::imshow("Debug: Combined Mask", &combined_mask)?; // Смотрим на итоговую склеенную маску!
 
         if highgui::wait_key(1)? == 113 { break; }
     }
