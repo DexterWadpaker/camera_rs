@@ -9,7 +9,7 @@ const ARENA_WIDTH_CM: f64 = 77.0;
 
 const MIN_OBSTACLE_AREA: f64 = 15.0; 
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-const MIN_ROBOT_AREA: f64 = 80.0; 
+const MIN_ROBOT_AREA: f64 = 70.0;
 const MAX_ROBOT_AREA: f64 = 700.0;
 const DETECTION_RADIUS_CM: f64 = 20.0;
 
@@ -33,7 +33,6 @@ fn get_orientation_marker(
     let mut best_idx = -1;
     for i in 0..contours.len() {
         let area = imgproc::contour_area(&contours.get(i)?, false)?;
-        // Метка должна быть хотя бы 10 пикселей, чтобы блик не прошел
         if area > 10.0 && area < 500.0 {
             if area > max_area {
                 max_area = area;
@@ -54,7 +53,7 @@ fn get_orientation_marker(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен.");
+    println!("📡 Умный трекер запущен. Подавление теней включено.");
 
     let mut cap_opt = None;
     for index in 0..6 {
@@ -89,15 +88,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = core::Mat::default();
     let mut black_mask = core::Mat::default();
 
+    // Снижаем S до 50
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 90.0, 60.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 50.0, 60.0, 0.0); 
 
-    // --- ЖЕСТКАЯ БЛОКИРОВКА БЛИКОВ ---
-    // S (вторая цифра) поднята до 150. Теперь ловится только глубокий, плотный цвет!
-    let lower_blue = Scalar::new(90.0, 150.0, 80.0, 0.0);
-    let upper_blue = Scalar::new(135.0, 255.0, 255.0, 0.0);
-    
-    let lower_pink = Scalar::new(145.0, 150.0, 80.0, 0.0);
+    // Расширяем цвета для темных маркеров на роботе
+    let lower_blue = Scalar::new(90.0, 80.0, 50.0, 0.0);
+    let upper_blue = Scalar::new(140.0, 255.0, 255.0, 0.0);
+    let lower_pink = Scalar::new(140.0, 80.0, 50.0, 0.0);
     let upper_pink = Scalar::new(180.0, 255.0, 255.0, 0.0);
 
     loop {
@@ -111,10 +109,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgproc::cvt_color_def(&blurred, &mut hsv, imgproc::COLOR_BGR2HSV)?;
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
+        // СКЛЕИВАЕМ РОБОТА
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
-        imgproc::erode(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
-        imgproc::dilate(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 4, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        // расширяем чтобы проглотить белые провода на шасси
+        imgproc::dilate(&black_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 6, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
+        // сужаем чтобы убрать мелкий мусор по краям
+        imgproc::erode(&temp_mask, &mut black_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
         let mut contours = Vector::<Vector<Point>>::new();
         imgproc::find_contours(&mut black_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
@@ -134,7 +135,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let area_cm2 = area_px * px2_to_cm2;
             let rect = imgproc::bounding_rect(&contour)?;
 
-            // ВЕРНУЛИ МЕРТВУЮ ЗОНУ НА 45
             let margin = 45; 
             if rect.x < margin || rect.y < margin || 
                rect.x + rect.width > frame_width as i32 - margin || 
