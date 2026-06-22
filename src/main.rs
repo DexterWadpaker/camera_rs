@@ -17,7 +17,7 @@ const DETECTION_RADIUS_CM: f64 = 20.0;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен. Режим: Слияние Черного и Синего силуэтов.");
+    println!("📡 Умный трекер запущен. Режим: Адаптация под Веб-камеру.");
 
     let mut cap_opt = None;
     for index in 0..6 {
@@ -49,17 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut frame = core::Mat::default();
 
-    // ФИЛЬТР ЧЕРНОГО (Гусеницы, тени под роботом, черные кубики)
-    // Оставили V до 70, чтобы не цеплять зеленую траву
+    // ФИЛЬТР ЧЕРНОГО ДЛЯ ШУМНЫХ ВЕБ-КАМЕР
+    // Подняли V до 115! Теперь "светло-черный" и серый шум тоже считаются роботом.
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 255.0, 70.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 255.0, 115.0, 0.0); 
 
-    // ФИЛЬТР СИНИХ БЛИКОВ (Отражающий пластик корпуса)
-    // H: 90-140 (Синий спектр)
-    // S: 40-255 (Любая насыщенность)
-    // V: 40-150 (Разрешаем ему быть гораздо светлее черного, чтобы поймать блик от окна)
-    let lower_blue_glare = Scalar::new(90.0, 40.0, 40.0, 0.0);
-    let upper_blue_glare = Scalar::new(140.0, 255.0, 150.0, 0.0);
+    // ФИЛЬТР БЛИКОВ ДЛЯ ШУМНЫХ ВЕБ-КАМЕР
+    // Опустили S до 20, чтобы ловить даже блеклые серо-голубые отблески
+    let lower_blue_glare = Scalar::new(90.0, 20.0, 40.0, 0.0);
+    let upper_blue_glare = Scalar::new(140.0, 255.0, 160.0, 0.0);
 
     loop {
         cap.read(&mut frame)?;
@@ -71,25 +69,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut hsv = core::Mat::default();
         imgproc::cvt_color_def(&blurred, &mut hsv, imgproc::COLOR_BGR2HSV)?;
 
-        // Создаем две отдельные маски
         let mut black_mask = core::Mat::default();
         core::in_range(&hsv, &lower_black, &upper_black, &mut black_mask)?;
 
         let mut blue_mask = core::Mat::default();
         core::in_range(&hsv, &lower_blue_glare, &upper_blue_glare, &mut blue_mask)?;
 
-        // СЛИЯНИЕ: Складываем черное и синее в одну общую картинку
         let mut combined_mask = core::Mat::default();
         core::bitwise_or(&black_mask, &blue_mask, &mut combined_mask, &core::Mat::default())?;
 
-        // СКЛЕИВАЕМ СИЛУЭТ (Завариваем швы между синим пластиком и черными гусеницами)
         let kernel = core::Mat::default();
         let mut temp_mask = core::Mat::default();
         imgproc::dilate(&combined_mask, &mut temp_mask, &kernel, Point::new(-1, -1), 6, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
         imgproc::erode(&temp_mask, &mut combined_mask, &kernel, Point::new(-1, -1), 2, core::BORDER_CONSTANT, imgproc::morphology_default_border_value()?)?;
 
         let mut contours = Vector::<Vector<Point>>::new();
-        // Ищем контуры уже по нашей ОБЪЕДИНЕННОЙ маске
         imgproc::find_contours(&mut combined_mask, &mut contours, imgproc::RETR_EXTERNAL, imgproc::CHAIN_APPROX_SIMPLE, Point::new(0, 0))?;
 
         let mut robot_packet = "RB:none".to_string();
@@ -171,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         imgproc::rectangle(&mut frame, safe_zone, Scalar::new(0.0, 100.0, 255.0, 0.0), 1, imgproc::LINE_8, 0)?;
 
         highgui::imshow("Brain Tracker", &frame)?;
-        highgui::imshow("Debug: Combined Mask", &combined_mask)?; // Смотрим на итоговую склеенную маску!
+        highgui::imshow("Debug: Combined Mask", &combined_mask)?;
 
         if highgui::wait_key(1)? == 113 { break; }
     }
