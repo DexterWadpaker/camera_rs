@@ -17,7 +17,7 @@ const DETECTION_RADIUS_CM: f64 = 20.0;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
     let robot_ip = "192.168.1.107:8888"; 
-    println!("📡 Умный трекер запущен. Режим: Адаптация под Веб-камеру.");
+    println!("📡 Умный трекер запущен. Режим: Адаптация под Веб-камеру (Грязный Серый).");
 
     let mut cap_opt = None;
     for index in 0..6 {
@@ -49,15 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mut frame = core::Mat::default();
 
-    // ФИЛЬТР ЧЕРНОГО ДЛЯ ШУМНЫХ ВЕБ-КАМЕР
-    // Подняли V до 115! Теперь "светло-черный" и серый шум тоже считаются роботом.
+    // ФИЛЬТР ТЬМЫ ДЛЯ СТЕНДОВОЙ КАМЕРЫ
+    // S до 85 допускаем цветовой шум матрицы
+    // V до 160 разрешаем роботу быть довольно светлым серым
     let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
-    let upper_black = Scalar::new(180.0, 255.0, 115.0, 0.0); 
+    let upper_black = Scalar::new(180.0, 85.0, 160.0, 0.0); 
 
-    // ФИЛЬТР БЛИКОВ ДЛЯ ШУМНЫХ ВЕБ-КАМЕР
-    // Опустили S до 20, чтобы ловить даже блеклые серо-голубые отблески
+    // ФИЛЬТР СИНИХ БЛИКОВ ОТ ДНЕВНОГО СВЕТА
     let lower_blue_glare = Scalar::new(90.0, 20.0, 40.0, 0.0);
-    let upper_blue_glare = Scalar::new(140.0, 255.0, 160.0, 0.0);
+    let upper_blue_glare = Scalar::new(140.0, 255.0, 180.0, 0.0);
 
     loop {
         cap.read(&mut frame)?;
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             robot_found = true;
 
             imgproc::rectangle(&mut frame, r_rect, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, 0)?;
-            imgproc::put_text(&mut frame, "ROBOT (BLK+BLU)", Point::new(r_rect.x, r_rect.y - 10), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, false)?;
+            imgproc::put_text(&mut frame, "ROBOT", Point::new(r_rect.x, r_rect.y - 10), imgproc::FONT_HERSHEY_SIMPLEX, 0.5, Scalar::new(0.0, 255.0, 0.0, 0.0), 2, imgproc::LINE_8, false)?;
 
             robot_packet = format!("RB:{:.1},{:.1}", robot_cx_cm, robot_cy_cm);
 
