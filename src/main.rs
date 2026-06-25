@@ -9,14 +9,13 @@ const ARENA_WIDTH_CM: f64 = 77.0;
 
 const MIN_OBSTACLE_AREA: f64 = 15.0; 
 const MAX_OBSTACLE_AREA: f64 = 140.0;
-// Снизил порог площади робота на случай, если камера висит выше обычного
 const MIN_ROBOT_AREA: f64 = 60.0; 
 const MAX_ROBOT_AREA: f64 = 700.0;
 const DETECTION_RADIUS_CM: f64 = 20.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind("0.0.0.0:8888").expect("Не удалось привязать сокет");
-    let robot_ip = "192.168.1.107:8888"; 
+    let socket = UdpSocket::bind("0.0.0.0:5555").expect("Не удалось привязать сокет");
+    let robot_ip = "192.168.1.107:5555"; 
     
     println!("========================================");
     println!("🛠️ РЕЖИМ ЖИВОЙ КАЛИБРОВКИ ЗАПУЩЕН!");
@@ -57,9 +56,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut v_max = 160.0; 
     let mut s_max = 85.0;  
 
+    // Счетчик кадров для ограничения частоты логов
+    let mut frame_counter = 0;
+
     loop {
         cap.read(&mut frame)?;
         if frame.empty() { continue; }
+
+        frame_counter += 1; // Увеличиваем счетчик каждый кадр
 
         let mut blurred = core::Mat::default();
         imgproc::gaussian_blur_def(&frame, &mut blurred, core::Size::new(7, 7), 0.0)?;
@@ -67,7 +71,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut hsv = core::Mat::default();
         imgproc::cvt_color_def(&blurred, &mut hsv, imgproc::COLOR_BGR2HSV)?;
 
-        // Фильтр обновляется в реальном времени!
         let lower_black = Scalar::new(0.0, 0.0, 0.0, 0.0);
         let upper_black = Scalar::new(180.0, s_max, v_max, 0.0); 
 
@@ -104,7 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue; 
             }
 
-            // РИСУЕМ ЖЕЛТЫЕ РАМКИ ВОКРУГ ВСЕГО НАЙДЕННОГО, ЧТОБЫ ТЫ ВИДЕЛ ПЛОЩАДЬ
             if area_cm2 > 10.0 {
                 imgproc::rectangle(&mut frame, rect, Scalar::new(0.0, 255.0, 255.0, 0.0), 1, imgproc::LINE_8, 0)?;
                 imgproc::put_text(&mut frame, &format!("{:.0}cm2", area_cm2), Point::new(rect.x, rect.y - 15), imgproc::FONT_HERSHEY_SIMPLEX, 0.4, Scalar::new(0.0, 255.0, 255.0, 0.0), 1, imgproc::LINE_8, false)?;
@@ -154,9 +156,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let obstacles_packet = if obstacles_vector.is_empty() { "OB:none".to_string() } else { format!("OB:{}", obstacles_vector.join("|")) };
         let final_packet = format!("{};{}\n", robot_packet, obstacles_packet);
-        let _ = socket.send_to(final_packet.as_bytes(), robot_ip);
+        
+        // --- ЛОГИРОВАНИЕ ОТПРАВКИ UDP ---
+        match socket.send_to(final_packet.as_bytes(), robot_ip) {
+            Ok(bytes_sent) => {
+                if frame_counter % 15 == 0 {
+                    println!("✅ [UDP] Отправлено {} байт на {}: {}", bytes_sent, robot_ip, final_packet.trim());
+                }
+            }
+            Err(e) => {
+                if frame_counter % 15 == 0 {
+                    println!("❌ [UDP] Ошибка отправки на {}: {}", robot_ip, e);
+                }
+            }
+        }
 
-        // ВЫВОД ЗНАЧЕНИЙ НА ЭКРАН
         imgproc::put_text(&mut frame, &format!("V Max (Brightness): {}", v_max), Point::new(10, 30), imgproc::FONT_HERSHEY_SIMPLEX, 0.7, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, false)?;
         imgproc::put_text(&mut frame, &format!("S Max (Color): {}", s_max), Point::new(10, 60), imgproc::FONT_HERSHEY_SIMPLEX, 0.7, Scalar::new(0.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, false)?;
         
@@ -166,13 +180,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         highgui::imshow("Brain Tracker", &frame)?;
         highgui::imshow("Debug: Mask", &black_mask)?;
 
-        // ОБРАБОТКА НАЖАТИЙ КЛАВИШ
         let key = highgui::wait_key(1)?;
-        if key == 113 { break; } // q
-        if key == 119 { v_max = (v_max + 10.0).min(255.0); } // w (Увеличить V)
-        if key == 115 { v_max = (v_max - 10.0).max(0.0);   } // s (Уменьшить V)
-        if key == 101 { s_max = (s_max + 5.0).min(255.0);  } // e (Увеличить S)
-        if key == 100 { s_max = (s_max - 5.0).max(0.0);    } // d (Уменьшить S)
+        if key == 113 { break; } 
+        if key == 119 { v_max = (v_max + 10.0).min(255.0); } 
+        if key == 115 { v_max = (v_max - 10.0).max(0.0);   } 
+        if key == 101 { s_max = (s_max + 5.0).min(255.0);  } 
+        if key == 100 { s_max = (s_max - 5.0).max(0.0);    } 
     }
     Ok(())
 }
