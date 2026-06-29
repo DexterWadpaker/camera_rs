@@ -48,7 +48,7 @@ sudo apt install libopencv-dev clang libclang-dev libv4l-dev v4l-utils
 
 2. Збірка проекту
 Bash
-git clone <URL_ВАШОГО_РЕПОЗИТОРІЮ>
+git clone https://github.com/DexterWadpaker/camera_rs
 cd <ІМ'Я_ПАПКИ>
 cargo build --release
 
